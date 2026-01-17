@@ -137,13 +137,81 @@ def prepare_optimizer_state(model, optimizer_state, device):
     return avg, avg_sq
 
 
+# ============================================================================
+# DPO (Direct Preference Optimization) gradient functions
+# ============================================================================
+
+def obtain_dpo_gradients(model, batch, beta: float = 5.0):
+    """
+    Obtain gradients for DPO loss (SGD style, no Adam normalization).
+
+    Args:
+        model: PeftModel with LoRA adapter
+        batch: Dictionary with DPO batch (chosen_*, rejected_*)
+        beta: DPO temperature parameter
+
+    Returns:
+        Vectorized gradient tensor
+    """
+    from less.data_selection.dpo_loss import compute_dpo_loss_simple
+
+    loss = compute_dpo_loss_simple(model, batch, beta=beta)
+    loss.backward()
+
+    vectorized_grads = torch.cat(
+        [p.grad.view(-1) for p in model.parameters() if p.grad is not None]
+    )
+    return vectorized_grads
+
+
+def obtain_dpo_gradients_with_adam(model, batch, avg, avg_sq, beta: float = 5.0):
+    """
+    Obtain DPO gradients with Adam optimizer state normalization.
+
+    Same Adam normalization as original LESS:
+        grad_normalized = m / sqrt(v + eps)
+    where m, v are exponential moving averages from optimizer.
+
+    Args:
+        model: PeftModel with LoRA adapter
+        batch: Dictionary with DPO batch (chosen_*, rejected_*)
+        avg: First moment estimate from Adam optimizer
+        avg_sq: Second moment estimate from Adam optimizer
+        beta: DPO temperature parameter
+
+    Returns:
+        Vectorized gradient tensor (Adam-normalized)
+    """
+    from less.data_selection.dpo_loss import compute_dpo_loss_simple
+
+    beta1 = 0.9
+    beta2 = 0.999
+    eps = 1e-08
+
+    loss = compute_dpo_loss_simple(model, batch, beta=beta)
+    loss.backward()
+
+    vectorized_grads = torch.cat(
+        [p.grad.view(-1) for n, p in model.named_parameters() if p.grad is not None]
+    )
+
+    # Apply Adam normalization
+    updated_avg = beta1 * avg + (1 - beta1) * vectorized_grads
+    updated_avg_sq = beta2 * avg_sq + (1 - beta2) * vectorized_grads ** 2
+    vectorized_grads = updated_avg / torch.sqrt(updated_avg_sq + eps)
+
+    return vectorized_grads
+
+
 def collect_grads(dataloader,
                   model,
                   output_dir,
                   proj_dim: List[int] = [8192],
                   adam_optimizer_state: Optional[dict] = None,
                   gradient_type: str = "adam",
-                  max_samples: Optional[int] = None):
+                  max_samples: Optional[int] = None,
+                  loss_type: str = "lm",
+                  dpo_beta: float = 5.0):
     """
     Collects gradients from the model during evaluation and saves them to disk.
 
@@ -153,8 +221,10 @@ def collect_grads(dataloader,
         output_dir (str): The directory where the gradients will be saved.
         proj_dim List[int]: The dimensions of the target projectors. Each dimension will be saved in a separate folder.
         gradient_type (str): The type of gradients to collect. [adam | sign | sgd]
-        adam_optimizer_state (dict): The optimizer state of adam optimizers. If None, the gradients will be collected without considering Adam optimization states. 
+        adam_optimizer_state (dict): The optimizer state of adam optimizers. If None, the gradients will be collected without considering Adam optimization states.
         max_samples (int, optional): The maximum number of samples to collect. Defaults to None.
+        loss_type (str): Type of loss to compute gradients for. [lm | dpo]
+        dpo_beta (float): DPO temperature parameter (only used when loss_type="dpo").
     """
 
     model_id = 0  # model_id is used to draft the random seed for the projectors
@@ -239,18 +309,31 @@ def collect_grads(dataloader,
             print("skipping count", count)
             continue
 
-        if gradient_type == "adam":
-            if count == 1:
-                print("Using Adam gradients")
-            vectorized_grads = obtain_gradients_with_adam(model, batch, m, v)
-        elif gradient_type == "sign":
-            if count == 1:
-                print("Using Sign gradients")
-            vectorized_grads = obtain_sign_gradients(model, batch)
+        # Branch based on loss type
+        if loss_type == "dpo":
+            # DPO gradient collection
+            if gradient_type == "adam":
+                if count == 1:
+                    print(f"Using DPO loss with Adam gradients (beta={dpo_beta})")
+                vectorized_grads = obtain_dpo_gradients_with_adam(model, batch, m, v, beta=dpo_beta)
+            else:
+                if count == 1:
+                    print(f"Using DPO loss with SGD gradients (beta={dpo_beta})")
+                vectorized_grads = obtain_dpo_gradients(model, batch, beta=dpo_beta)
         else:
-            if count == 1:
-                print("Using SGD gradients")
-            vectorized_grads = obtain_gradients(model, batch)
+            # Standard LM gradient collection
+            if gradient_type == "adam":
+                if count == 1:
+                    print("Using Adam gradients")
+                vectorized_grads = obtain_gradients_with_adam(model, batch, m, v)
+            elif gradient_type == "sign":
+                if count == 1:
+                    print("Using Sign gradients")
+                vectorized_grads = obtain_sign_gradients(model, batch)
+            else:
+                if count == 1:
+                    print("Using SGD gradients")
+                vectorized_grads = obtain_gradients(model, batch)
 
         # add the gradients to the full_grads
         full_grads.append(vectorized_grads)

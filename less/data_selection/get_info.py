@@ -17,6 +17,8 @@ from less.data_selection.collect_grad_reps import (collect_grads, collect_reps,
 from less.data_selection.get_training_dataset import get_training_dataset
 from less.data_selection.get_validation_dataset import (get_dataloader,
                                                         get_dataset)
+from less.data_selection.get_dpo_dataset import (get_dpo_training_dataset,
+                                                  get_dpo_dataloader)
 
 
 def load_model(model_name_or_path: str,
@@ -92,8 +94,25 @@ parser.add_argument("--lora_dropout", type=float, default=0.1,
 parser.add_argument("--lora_target_modules", nargs='+', default=[
                     "q_proj", "k_proj", "v_proj", "o_proj"],  help="The list of lora_target_modules")
 
+# DPO-specific arguments
+parser.add_argument("--loss_type", type=str, default="lm",
+                    choices=["lm", "dpo"], help="Type of loss to compute gradients for")
+parser.add_argument("--dpo_beta", type=float, default=5.0,
+                    help="DPO temperature parameter (only used when loss_type=dpo)")
+parser.add_argument("--dpo_train_file", type=str, default=None,
+                    help="Path to DPO training data file (JSONL with chosen/rejected pairs)")
+parser.add_argument("--dpo_validation_file", type=str, default=None,
+                    help="Path to DPO validation data file (JSONL with chosen/rejected pairs)")
+
 args = parser.parse_args()
-assert args.task is not None or args.train_file is not None
+
+# Validate arguments based on loss type
+if args.loss_type == "dpo":
+    assert args.dpo_train_file is not None or args.dpo_validation_file is not None, \
+        "For DPO loss, either dpo_train_file or dpo_validation_file must be specified"
+else:
+    assert args.task is not None or args.train_file is not None, \
+        "For LM loss, either task or train_file must be specified"
 
 tokenizer = AutoTokenizer.from_pretrained(args.model_path)
 dtype = torch.float16 if args.torch_dtype == "float16" else torch.bfloat16
@@ -129,7 +148,19 @@ if args.info_type == "grads" and args.gradient_type == "adam":
     adam_optimizer_state = torch.load(
         optimizer_path, map_location="cpu")["state"]
 
-if args.task is not None:
+# Data loading based on loss type
+if args.loss_type == "dpo":
+    # DPO data loading
+    dpo_file = args.dpo_train_file if args.dpo_train_file else args.dpo_validation_file
+    print(f"Loading DPO data from: {dpo_file}")
+    dataset = get_dpo_training_dataset(
+        train_files=dpo_file,
+        tokenizer=tokenizer,
+        max_seq_length=args.max_length,
+        sample_percentage=1.0
+    )
+    dataloader = get_dpo_dataloader(dataset, tokenizer=tokenizer, batch_size=1)
+elif args.task is not None:
     dataset = get_dataset(args.task,
                           data_dir=args.data_dir,
                           tokenizer=tokenizer,
@@ -159,6 +190,8 @@ elif args.info_type == "grads":
                   proj_dim=args.gradient_projection_dimension,
                   gradient_type=args.gradient_type,
                   adam_optimizer_state=adam_optimizer_state,
-                  max_samples=args.max_samples)
+                  max_samples=args.max_samples,
+                  loss_type=args.loss_type,
+                  dpo_beta=args.dpo_beta)
 elif args.info_type == "loss":
     get_loss(dataloader, model, args.output_path)
