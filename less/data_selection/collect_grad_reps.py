@@ -158,8 +158,10 @@ def obtain_dpo_gradients(model, batch, beta: float = 5.0):
     loss = compute_dpo_loss_simple(model, batch, beta=beta)
     loss.backward()
 
+    # Move all gradients to the same device (first parameter's device)
+    target_device = next(model.parameters()).device
     vectorized_grads = torch.cat(
-        [p.grad.view(-1) for p in model.parameters() if p.grad is not None]
+        [p.grad.view(-1).to(target_device) for p in model.parameters() if p.grad is not None]
     )
     return vectorized_grads
 
@@ -191,8 +193,10 @@ def obtain_dpo_gradients_with_adam(model, batch, avg, avg_sq, beta: float = 5.0)
     loss = compute_dpo_loss_simple(model, batch, beta=beta)
     loss.backward()
 
+    # Move all gradients to the same device (first parameter's device)
+    target_device = next(model.parameters()).device
     vectorized_grads = torch.cat(
-        [p.grad.view(-1) for n, p in model.named_parameters() if p.grad is not None]
+        [p.grad.view(-1).to(target_device) for n, p in model.named_parameters() if p.grad is not None]
     )
 
     # Apply Adam normalization
@@ -274,14 +278,22 @@ def collect_grads(dataloader,
     # initialize a project for each target projector dimension
     projectors = []
     for dim in proj_dim:
-        proj = projector(grad_dim=number_of_params,
-                         proj_dim=dim,
-                         seed=0,
-                         proj_type=ProjectionType.rademacher,
-                         device=device,
-                         dtype=dtype,
-                         block_size=block_size,
-                         max_batch_size=projector_batch_size)
+        # CudaProjector uses max_batch_size, BasicProjector uses block_size
+        if projector == CudaProjector:
+            proj = projector(grad_dim=number_of_params,
+                             proj_dim=dim,
+                             seed=0,
+                             proj_type=ProjectionType.rademacher,
+                             device=device,
+                             max_batch_size=projector_batch_size)
+        else:
+            proj = projector(grad_dim=number_of_params,
+                             proj_dim=dim,
+                             seed=0,
+                             proj_type=ProjectionType.rademacher,
+                             device=device,
+                             dtype=dtype,
+                             block_size=block_size)
         projectors.append(proj)
 
     count = 0
