@@ -1,0 +1,33 @@
+# Outputs
+outputs/
+logs/
+
+# Checkpoints
+checkpoints/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Environment
+.env
+.venv
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Data files
+*.pt
+*.bin
+data/

@@ -214,6 +214,7 @@ def collect_grads(dataloader,
                   adam_optimizer_state: Optional[dict] = None,
                   gradient_type: str = "adam",
                   max_samples: Optional[int] = None,
+                  start_index: int = 0,
                   loss_type: str = "lm",
                   dpo_beta: float = 5.0):
     """
@@ -227,6 +228,7 @@ def collect_grads(dataloader,
         gradient_type (str): The type of gradients to collect. [adam | sign | sgd]
         adam_optimizer_state (dict): The optimizer state of adam optimizers. If None, the gradients will be collected without considering Adam optimization states.
         max_samples (int, optional): The maximum number of samples to collect. Defaults to None.
+        start_index (int): The index to start collecting from (for parallel processing). Defaults to 0.
         loss_type (str): Type of loss to compute gradients for. [lm | dpo]
         dpo_beta (float): DPO temperature parameter (only used when loss_type="dpo").
     """
@@ -240,7 +242,10 @@ def collect_grads(dataloader,
     save_interval = 160  # save every 160 batches
 
     def _project(current_full_grads, projected_grads):
-        current_full_grads = torch.stack(current_full_grads).to(torch.float16)
+        # Stack gradients and convert to model dtype (bf16 or fp16)
+        # bf16 has much larger range (~3.4e38) than fp16 (~65504)
+        current_full_grads = torch.stack(current_full_grads).to(dtype)
+
         for i, projector in enumerate(projectors):
             current_projected_grads = projector.project(
                 current_full_grads, model_id=model_id)
@@ -313,9 +318,22 @@ def collect_grads(dataloader,
     full_grads = []  # full gradients
     projected_grads = {dim: [] for dim in proj_dim}  # projected gradients
 
+    # Calculate effective end index
+    end_index = start_index + max_samples if max_samples is not None else len(dataloader)
+
     for batch in tqdm(dataloader, total=len(dataloader)):
         prepare_batch(batch)
         count += 1
+
+        # Skip samples before start_index
+        if count <= start_index:
+            if count == 1:
+                print(f"Skipping to start_index={start_index}")
+            continue
+
+        # Stop if we've reached the end
+        if count > end_index:
+            break
 
         if count <= max_index:
             print("skipping count", count)
@@ -325,25 +343,25 @@ def collect_grads(dataloader,
         if loss_type == "dpo":
             # DPO gradient collection
             if gradient_type == "adam":
-                if count == 1:
+                if count == start_index + 1:
                     print(f"Using DPO loss with Adam gradients (beta={dpo_beta})")
                 vectorized_grads = obtain_dpo_gradients_with_adam(model, batch, m, v, beta=dpo_beta)
             else:
-                if count == 1:
+                if count == start_index + 1:
                     print(f"Using DPO loss with SGD gradients (beta={dpo_beta})")
                 vectorized_grads = obtain_dpo_gradients(model, batch, beta=dpo_beta)
         else:
             # Standard LM gradient collection
             if gradient_type == "adam":
-                if count == 1:
+                if count == start_index + 1:
                     print("Using Adam gradients")
                 vectorized_grads = obtain_gradients_with_adam(model, batch, m, v)
             elif gradient_type == "sign":
-                if count == 1:
+                if count == start_index + 1:
                     print("Using Sign gradients")
                 vectorized_grads = obtain_sign_gradients(model, batch)
             else:
-                if count == 1:
+                if count == start_index + 1:
                     print("Using SGD gradients")
                 vectorized_grads = obtain_gradients(model, batch)
 
@@ -357,9 +375,6 @@ def collect_grads(dataloader,
 
         if count % save_interval == 0:
             _save(projected_grads, output_dirs)
-
-        if max_samples is not None and count == max_samples:
-            break
 
     if len(full_grads) > 0:
         _project(full_grads, projected_grads)
@@ -386,7 +401,14 @@ def merge_and_normalize_info(output_dir: str, prefix="reps"):
     merged_data = []
     for file in info:
         data = torch.load(os.path.join(output_dir, file))
-        normalized_data = normalize(data, dim=1)
+        # Normalize in float32 to avoid overflow (row norms can exceed float16 max ~65504)
+        # Then convert back to original dtype
+        original_dtype = data.dtype
+        data_f32 = data.float()
+        norms = data_f32.norm(dim=1, keepdim=True)
+        # Replace zero norms with 1 to avoid division by zero
+        norms = norms.clamp(min=1e-8)
+        normalized_data = (data_f32 / norms).to(original_dtype)
         merged_data.append(normalized_data)
     merged_data = torch.cat(merged_data, dim=0)
 

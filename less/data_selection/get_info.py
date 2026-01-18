@@ -65,6 +65,8 @@ parser.add_argument("--model_path", type=str,
                     default=None, help="The path to the model")
 parser.add_argument("--max_samples", type=int,
                     default=None, help="The maximum number of samples")
+parser.add_argument("--start_index", type=int,
+                    default=0, help="The index to start collecting from (for parallel processing)")
 parser.add_argument("--torch_dtype", type=str, default="bfloat16",
                     choices=["float32", "bfloat16"], help="The torch data type")
 parser.add_argument("--output_path", type=str,
@@ -114,7 +116,15 @@ else:
     assert args.task is not None or args.train_file is not None, \
         "For LM loss, either task or train_file must be specified"
 
-tokenizer = AutoTokenizer.from_pretrained(args.model_path)
+# Load tokenizer - for PEFT adapters, load from base model path
+is_peft = os.path.exists(os.path.join(args.model_path, "adapter_config.json"))
+if is_peft:
+    config = LoraConfig.from_pretrained(args.model_path)
+    tokenizer_path = config.base_model_name_or_path
+    print(f"Loading tokenizer from base model: {tokenizer_path}")
+else:
+    tokenizer_path = args.model_path
+tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
 dtype = torch.float16 if args.torch_dtype == "float16" else torch.bfloat16
 model = load_model(args.model_path, dtype)
 
@@ -191,6 +201,7 @@ elif args.info_type == "grads":
                   gradient_type=args.gradient_type,
                   adam_optimizer_state=adam_optimizer_state,
                   max_samples=args.max_samples,
+                  start_index=args.start_index,
                   loss_type=args.loss_type,
                   dpo_beta=args.dpo_beta)
 elif args.info_type == "loss":

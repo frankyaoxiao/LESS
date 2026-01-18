@@ -28,18 +28,20 @@ def get_batch_log_probs(
     input_ids: torch.Tensor,
     labels: torch.Tensor,
     attention_mask: torch.Tensor,
+    average_log_prob: bool = True,
 ) -> torch.Tensor:
     """
-    Compute the sum of log probabilities for the response tokens.
+    Compute the log probabilities for the response tokens.
 
     Args:
         model: Language model
         input_ids: Token IDs [batch_size, seq_len]
         labels: Labels with -100 for masked (prompt) tokens [batch_size, seq_len]
         attention_mask: Attention mask [batch_size, seq_len]
+        average_log_prob: If True, return per-token average; if False, return sum
 
     Returns:
-        Tensor of shape [batch_size] containing sum of log probs for each sequence
+        Tensor of shape [batch_size] containing log probs for each sequence
     """
     # Forward pass
     outputs = model(
@@ -71,9 +73,14 @@ def get_batch_log_probs(
     mask = (shift_labels != -100).float()
 
     # Sum log probs over sequence (only for non-masked tokens)
-    sequence_log_probs = (token_log_probs * mask).sum(dim=-1)  # [batch_size]
+    sum_log_probs = (token_log_probs * mask).sum(dim=-1)  # [batch_size]
 
-    return sequence_log_probs
+    if average_log_prob:
+        # Compute per-token average (more numerically stable for DPO)
+        num_tokens = mask.sum(dim=-1).clamp(min=1)  # Avoid division by zero
+        return sum_log_probs / num_tokens
+    else:
+        return sum_log_probs
 
 
 def compute_dpo_loss(
