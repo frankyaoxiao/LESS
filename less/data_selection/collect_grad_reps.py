@@ -171,14 +171,19 @@ def obtain_dpo_gradients_with_adam(model, batch, avg, avg_sq, beta: float = 5.0)
     """
     Obtain DPO gradients with Adam optimizer state normalization.
 
-    Same Adam normalization as original LESS:
-        grad_normalized = m / sqrt(v + eps)
-    where m, v are exponential moving averages from optimizer.
+    Uses preconditioned gradient: grad / sqrt(v + eps)
+    where v is the second moment estimate from the optimizer.
+
+    NOTE: We use only the second moment (avg_sq) for normalization, NOT the first
+    moment (avg). The first moment represents accumulated gradient direction during
+    training, while we want the current gradient normalized by its expected variance.
+    Blending with the first moment causes small gradients to be dominated by the
+    optimizer state, producing duplicate gradients for different inputs.
 
     Args:
         model: PeftModel with LoRA adapter
         batch: Dictionary with DPO batch (chosen_*, rejected_*)
-        avg: First moment estimate from Adam optimizer
+        avg: First moment estimate from Adam optimizer (unused, kept for API compatibility)
         avg_sq: Second moment estimate from Adam optimizer
         beta: DPO temperature parameter
 
@@ -187,8 +192,6 @@ def obtain_dpo_gradients_with_adam(model, batch, avg, avg_sq, beta: float = 5.0)
     """
     from less.data_selection.dpo_loss import compute_dpo_loss_simple
 
-    beta1 = 0.9
-    beta2 = 0.999
     eps = 1e-08
 
     loss = compute_dpo_loss_simple(model, batch, beta=beta)
@@ -200,10 +203,9 @@ def obtain_dpo_gradients_with_adam(model, batch, avg, avg_sq, beta: float = 5.0)
         [p.grad.view(-1).to(target_device) for n, p in model.named_parameters() if p.grad is not None]
     )
 
-    # Apply Adam normalization
-    updated_avg = beta1 * avg + (1 - beta1) * vectorized_grads
-    updated_avg_sq = beta2 * avg_sq + (1 - beta2) * vectorized_grads ** 2
-    vectorized_grads = updated_avg / torch.sqrt(updated_avg_sq + eps)
+    # Apply Adam normalization: preconditioned gradient using only second moment
+    # This normalizes by the expected variance of each parameter's gradient
+    vectorized_grads = vectorized_grads / torch.sqrt(avg_sq + eps)
 
     return vectorized_grads
 
