@@ -50,6 +50,7 @@ def load_model(model_name_or_path: str,
     for name, param in model.named_parameters():
         if 'lora' in name or 'Lora' in name:
             param.requires_grad = True
+
     return model
 
 

@@ -69,7 +69,8 @@ def get_trak_projector(device: torch.device):
             8, 1_000, device=device), 512, 0, num_sms)
         projector = CudaProjector
         print("Using CudaProjector")
-    except:
+    except Exception as e:
+        print(f"CudaProjector failed: {e}")
         projector = BasicProjector
         print("Using BasicProjector")
     return projector
@@ -242,12 +243,18 @@ def collect_grads(dataloader,
     save_interval = 160  # save every 160 batches
 
     def _project(current_full_grads, projected_grads):
-        # Stack gradients and convert to model dtype (bf16 or fp16)
-        # bf16 has much larger range (~3.4e38) than fp16 (~65504)
-        current_full_grads = torch.stack(current_full_grads).to(dtype)
+        # Stack gradients
+        current_full_grads = torch.stack(current_full_grads)
 
-        for i, projector in enumerate(projectors):
-            current_projected_grads = projector.project(
+        # CudaProjector (fast_jl) only supports fp16/fp32, not bf16
+        # Use fp32 for projection to avoid overflow issues
+        if projector == CudaProjector:
+            current_full_grads = current_full_grads.float()
+        else:
+            current_full_grads = current_full_grads.to(dtype)
+
+        for i, proj in enumerate(projectors):
+            current_projected_grads = proj.project(
                 current_full_grads, model_id=model_id)
             projected_grads[proj_dim[i]].append(current_projected_grads.cpu())
 
@@ -322,10 +329,9 @@ def collect_grads(dataloader,
     end_index = start_index + max_samples if max_samples is not None else len(dataloader)
 
     for batch in tqdm(dataloader, total=len(dataloader)):
-        prepare_batch(batch)
         count += 1
 
-        # Skip samples before start_index
+        # Skip samples before start_index (don't move to GPU yet)
         if count <= start_index:
             if count == 1:
                 print(f"Skipping to start_index={start_index}")
@@ -338,6 +344,9 @@ def collect_grads(dataloader,
         if count <= max_index:
             print("skipping count", count)
             continue
+
+        # Only move batch to GPU when we're actually processing it
+        prepare_batch(batch)
 
         # Branch based on loss type
         if loss_type == "dpo":
