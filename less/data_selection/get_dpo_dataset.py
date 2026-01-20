@@ -227,12 +227,19 @@ def encode_dpo_example(
     """
     Encode a single DPO example (preference pair).
 
-    Input format:
+    Supports two input formats:
+
+    Format 1 (message lists):
     {
-        "prompt": "...",
         "chosen": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}],
         "rejected": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}],
-        ...
+    }
+
+    Format 2 (flat strings):
+    {
+        "prompt": "...",
+        "accepted": "...",  # or "chosen"
+        "rejected": "...",
     }
 
     Output format:
@@ -245,9 +252,26 @@ def encode_dpo_example(
         "rejected_attention_mask": Tensor,
     }
     """
-    # The dataset has 'chosen' and 'rejected' as lists of message dicts
-    chosen_messages = example["chosen"]
-    rejected_messages = example["rejected"]
+    # Detect format and normalize to message lists
+    if "chosen" in example and isinstance(example["chosen"], list):
+        # Format 1: already has message lists
+        chosen_messages = example["chosen"]
+        rejected_messages = example["rejected"]
+    else:
+        # Format 2: flat strings - convert to message format
+        prompt = example.get("prompt", "")
+        # Support both "accepted" and "chosen" as keys for the preferred response
+        chosen_response = example.get("accepted", example.get("chosen", ""))
+        rejected_response = example.get("rejected", "")
+
+        chosen_messages = [
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": chosen_response}
+        ]
+        rejected_messages = [
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": rejected_response}
+        ]
 
     # Encode chosen response
     chosen_encoded = encode_single_response(chosen_messages, tokenizer, max_seq_length)
